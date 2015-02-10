@@ -2,6 +2,7 @@ import sqlite3
 import pandas as pd
 
 print 'hello world'
+print 'hello world2'
 
 
 con = sqlite3.connect('compData.db')
