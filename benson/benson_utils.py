@@ -4,7 +4,7 @@ import csv
 import dateutil.parser
 import re
 # import sys
-# import operator
+#
 import matplotlib.pyplot as plt
 # import datetime
 
@@ -250,6 +250,7 @@ def PlotStationVolumeWithAverages(station_volume,station):
     plt.xlabel('Date')
     plt.ylabel('Passenger Volume')
     plt.tick_params(axis='x', which='major', labelsize=8)
+    plt.xticks(rotation=45)
     plt.plot(*zip(*sorted(station_vals)))
     plt.axhline(y=sum(weekday_vals)/float(len(weekday_vals)), linewidth=2, color = 'k')
     plt.axhline(y=sum(weekend_vals)/float(len(weekend_vals)), linewidth=2, color = 'k')
