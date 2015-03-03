@@ -277,8 +277,8 @@ def scrape_bom(movie_urls):
             time.sleep(sleep)
             print 'processed:',opened
             print 'skipped',skipped
-            pickle.dump(movie_data, open("mojo_scrub.p", "wb" ))
-            pickle.dump(skipped_urls, open("mojo_scrub_skipped.p", "wb" ) )
+            pickle.dump(movie_data, open("mojo_scrape.p", "wb" ))
+            pickle.dump(skipped_urls, open("mojo_scrape_skipped.p", "wb" ) )
 
 
         movies_url = movie_urls[i]
@@ -314,5 +314,6 @@ def scrape_bom(movie_urls):
             skipped_urls.append(movies_url)
 
 
-    pickle.dump(movie_data, open("mojo_scrub.p", "wb" ))
-    pickle.dump(skipped_urls, open("mojo_scrub_skipped.p", "wb" ) )
+    pickle.dump(movie_data, open("mojo_scrape.p", "wb" ))
+    pickle.dump(skipped_urls, open("mojo_scrape_skipped.p", "wb" ) )
+    return movie_data
