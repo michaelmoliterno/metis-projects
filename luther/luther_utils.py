@@ -3,12 +3,18 @@ __author__ = 'michaelmoliterno'
 
 import urllib2
 from bs4 import BeautifulSoup
+import pandas as pd
 import re
 import matplotlib.pyplot as plt
 import pickle
 import time
 from random import randint
 import dateutil.parser
+import operator
+import numpy as np
+from pandasql import sqldf
+
+
 
 
 def get_bom_alpha_urls():
@@ -317,3 +323,251 @@ def scrape_bom(movie_urls):
     pickle.dump(movie_data, open("mojo_scrape.p", "wb" ))
     pickle.dump(skipped_urls, open("mojo_scrape_skipped.p", "wb" ) )
     return movie_data
+
+
+
+
+def set_season(x):
+    if x in [5,6,7]:
+        return 'summer'
+    elif x in [11,12]:
+        return 'holiday'
+    else:
+        return 'off'
+
+
+def get_movies_with_budget(movies_df):
+    # from pandasql import sqldf
+    #pysqldf = lambda q: sqldf(q, globals())
+
+    movies_df['budget_int'] = 0
+
+    #print movies_df.head()
+
+    # These movies have budgets formatted: '$XX million'
+    q = "SELECT * FROM movies_df where release_date > '1990-01-01 00:00:00' and release_date < '2014-11-01 00:00:00' and budget like '%million%' and widest_release >0;"
+
+    movies_budget_over_mil =  sqldf(q,locals());
+
+
+    # These movies have budgets formatted $X,XXX,XXX with the maximum value of one million
+    q= "SELECT * FROM movies_df where release_date > '1990-01-01 00:00:00' and release_date < '2014-11-01 00:00:00' and budget not like '%million%' and budget not like 'N/A' and widest_release >0;"
+
+    movies_budget_under_mil =  sqldf(q,locals());
+
+    ### clean up the budgets, convert to INT
+    for index,row in movies_budget_over_mil.iterrows():
+        movies_budget_over_mil.ix[index,'budget_int'] = float(row['budget'].split()[0].replace('$',''))*1000000
+
+    for index,row in movies_budget_under_mil.iterrows():
+        movies_budget_under_mil.ix[index,'budget_int'] = float(row['budget'].replace('$','').replace(',',''))
+
+    movies_df = movies_budget_over_mil.append(movies_budget_under_mil,ignore_index = True)
+
+    ### add values that we will need for future processing
+    movies_df['ones'] = 1.0
+    movies_df['total_gross'] = 0.0
+
+    for players in ['actors','directors','writers','producers']:
+        movies_df[players] = ''
+
+    movies_df['release_month'] = pd.DatetimeIndex(movies_df['release_date']).month
+    movies_df['season'] = movies_df['release_month'].map(lambda x: set_season(x))
+
+    return movies_df
+
+def deflate_dollar_values(movies_df):
+
+
+    ## we need these data to convert to 2014 dollars
+
+    cpi = pd.read_csv('CPI-2005.csv')
+    cpi['inflator'] = 0
+
+    for index, row in cpi.iterrows():
+        cpi.ix[index,'inflator'] = 121.2/row['CPI2005base']
+        cpi.ix[index,'Date'] = row['Date'].split('/')[2]
+
+    cpi_date_indexed = cpi.set_index('Date')
+
+
+    ## convert all $ values to 2014 dollars
+
+    for index,row in movies_df.iterrows():
+
+        year = str(row['release_date'].year)
+
+        if year in cpi.index.values:
+            inflator = cpi_date_indexed.loc[year]['inflator']
+            cpi.ix[index,'foreign_total_gross'] = row['foreign_total_gross']*inflator
+            cpi.ix[index,'domestic_total_gross'] = row['domestic_total_gross']*inflator
+            cpi.ix[index,'budget_int'] = row['budget_int']*inflator
+
+    ## calculate the total (worldwide) gross for a movie
+    for index,row in movies_df.iterrows():
+        movies_df.ix[index,'total_gross'] = row['domestic_total_gross'] + row['foreign_total_gross']
+
+
+    movies_df['log_total_gross'] = np.log1p(movies_df['total_gross'])
+    movies_df['log_domestic_gross'] = np.log1p(movies_df['domestic_total_gross'])
+    movies_df['log_foreign_gross'] = np.log1p(movies_df['foreign_total_gross'])
+    movies_df['log_budget'] = np.log1p(movies_df['budget_int'])
+    movies_df['log_widest_release'] = np.log1p(movies_df['widest_release'])
+    #movies_df['log_in_release'] = np.log1p(movies_df['in_release'])
+
+    return movies_df
+
+### this puts the playrs in their own column and semi-colon delimited
+def separate_players(movies_df):
+    for index,row in movies_df.iterrows():
+
+        actors = []
+        directors = []
+        writers = []
+
+        for player in row['players'].split(';'):
+            player_type = player.split(':')[0]
+            if player_type == 'Actor':
+                actors.append('actor_'+player.split(':')[1].replace(" ", "").replace(".","").replace("&",""))
+            elif player_type == 'Director':
+                directors.append('director_'+player.split(':')[1].replace(" ", "").replace(".","").replace("&",""))
+            elif player_type == 'Writer':
+                writers.append('writer_'+player.split(':')[1].replace(" ", "").replace(".","").replace("&",""))
+
+        movies_df.ix[index, 'actors'] = ';'.join(actors)
+        movies_df.ix[index, 'directors'] =  ';'.join(directors)
+        movies_df.ix[index, 'writers'] =  ';'.join(writers)
+
+    return movies_df
+
+
+### count the genres in the model
+def add_genres_columns(movies_df, min_occurances=20):
+    genres_count = {}
+
+    for index,row in movies_df.iterrows():
+
+        for genre in row['genres'].split(';'):
+            if len(genre.split()):
+                genre_movie = genre.split()[0]
+                if genre_movie not in genres_count.keys():
+                    genres_count[genre_movie] = 1
+                else:
+                    genres_count[genre_movie] = genres_count[genre_movie] + 1
+
+    model_genres = []
+    sorted_genres = sorted(genres_count.items(), key=operator.itemgetter(1), reverse=True)
+    for genre in sorted_genres:
+        if genre[1]>=min_occurances:
+            model_genres.append(genre[0])
+
+    ### and this adds them to the model
+    for genre in model_genres:
+        movies_df[genre] = 0
+
+
+    # adds the genres
+    for index,row in movies_df.iterrows():
+
+        for genre in row['genres'].split(';'):
+            if len(genre.split()):
+                genre_movie = genre.split()[0]
+                for model_genre in model_genres:
+                    if genre_movie == model_genre:
+                        movies_df.ix[index, model_genre] = 1
+
+    return movies_df, model_genres
+
+
+def dummify_players(movies_df,min_occurances=5):
+
+    ### this creates a dictionary of all of the players in our dataset
+
+    all_actors = {}
+    all_directors = {}
+    all_writers = {}
+
+    for index,row in movies_df.iterrows():
+
+        for writer in row['writers'].split(';'):
+            if writer != '':
+                if writer not in all_writers.keys():
+                    all_writers[writer] = 1
+                else:
+                    all_writers[writer] = all_writers[writer] + 1
+
+        for actor in row['actors'].split(';'):
+            if actor != '':
+                if actor not in all_actors.keys():
+                    all_actors[actor] = 1
+                else:
+                    all_actors[actor] = all_actors[actor] + 1
+
+        for director in row['directors'].split(';'):
+            if director != '':
+                if director not in all_directors.keys():
+                    all_directors[director] = 1
+                else:
+                    all_directors[director] = all_directors[director] + 1
+
+
+    ###this creates a list of writers that will be added to the model
+    model_writers = []
+    sorted_writers = sorted(all_writers.items(), key=operator.itemgetter(1), reverse=True)
+
+    for writer in sorted_writers:
+        if writer[1]>=min_occurances:
+            model_writers.append(writer[0])
+
+    for writer in model_writers:
+        movies_df[writer] = 0
+
+
+    for index,row in movies_df.iterrows():
+        for movie_writer in row['writers'].split(';'):
+            for model_writer in model_writers:
+                if movie_writer == model_writer:
+                    movies_df.ix[index, model_writer] = 1
+
+
+    ###this creates a list of actors that will be added to the model
+    model_actors = []
+    sorted_actors = sorted(all_actors.items(), key=operator.itemgetter(1), reverse=True)
+
+    for actor in sorted_actors:
+        if actor[1] >= min_occurances:
+            model_actors.append(actor[0])
+
+    for actor in model_actors:
+        movies_df[actor] = 0
+
+
+    for index,row in movies_df.iterrows():
+        for movie_actor in row['actors'].split(';'):
+            for model_actor in model_actors:
+                if movie_actor == model_actor:
+                    movies_df.ix[index, model_actor] = 1
+
+
+    ###this creates a list of directors that will be added to the model
+    model_directors = []
+    sorted_directors = sorted(all_directors.items(), key=operator.itemgetter(1), reverse=True)
+
+    for director in sorted_directors:
+        if director[1] >= min_occurances:
+            model_directors.append(director[0])
+
+
+    for director in model_directors:
+        movies_df[director] = 0
+
+    for index,row in movies_df.iterrows():
+        for movie_director in row['directors'].split(';'):
+            for model_director in model_directors:
+                if movie_director == model_director:
+                    movies_df.ix[index, model_director] = 1
+
+    return movies_df, model_actors, model_directors, model_writers
+
+
+
